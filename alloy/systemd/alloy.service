@@ -1,0 +1,23 @@
+[Unit]
+Description=Grafana Alloy Service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=alloy
+Group=alloy
+Type=simple
+EnvironmentFile=-/etc/default/alloy
+ExecStart=/usr/local/bin/alloy run /etc/alloy/config.river
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+# Hardening (optional)
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

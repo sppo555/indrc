@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-alerting-provisioning
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: grafana
+    grafana_alerting_provisioning: "1"
+data:
+  contact-points.yaml: |
+    apiVersion: 1
+    contactPoints:
+      - orgId: 1
+        name: Telegram
+        receivers:
+          - uid: telegram-default
+            type: telegram
+            settings:
+              bottoken: ${TELEGRAM_BOT_TOKEN}
+              chatid: ${TELEGRAM_CHAT_ID}
+              disable_notification: false
+              message: '{{ template "default.message" . }}'
+  notification-policies.yaml: |
+    apiVersion: 1
+    policies:
+      - orgId: 1
+        receiver: Telegram
+        group_by: ["alertname"]
+        # 亦可在此定義更細的 routes 規則

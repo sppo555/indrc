@@ -1,0 +1,189 @@
+# Loki All-in-One 單一 Pod 配置
+# 使用 GCS 作為物件儲存，透過 GKE Workload Identity 存取
+
+# 關鍵：使用 SingleBinary 部署模式
+deploymentMode: SingleBinary
+
+# 單一二進制配置
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: false
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 2
+      memory: 4Gi
+  # 服務配置 - 使用內部 LoadBalancer 而非 Ingress
+  service:
+    type: LoadBalancer
+    annotations:
+      cloud.google.com/load-balancer-type: "Internal"
+      # 注意: 若要使用固定 IP，需先在 GCP 中預留靜態內部 IP
+      # 執行: gcloud compute addresses create loki-ip --region=<區域> --subnet=<子網路> --addresses=<想要的IP>
+      # 然後添加: cloud.google.com/address-name: "loki-ip"
+    labels:
+      app.kubernetes.io/name: loki
+      app.kubernetes.io/instance: loki
+    # 使用標準的 HTTP 埠口 3100 (預設 Loki 埠口)
+    ports:
+      http:
+        port: 3100
+        protocol: TCP
+        targetPort: http
+
+# 關閉所有其他組件
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+gateway:
+  enabled: false
+
+# 關閉 Canary 和緩存組件
+monitoring:
+  lokiCanary:
+    enabled: false
+  # 移到下方的 monitoring 部分合併
+  dashboards:
+    enabled: false
+  rules:
+    enabled: false
+  serviceMonitor:
+    enabled: false
+  selfMonitoring:
+    enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+memcached:
+  enabled: false
+memcachedChunks:
+  enabled: false
+memcachedFrontend:
+  enabled: false
+memcachedIndexQueries:
+  enabled: false
+
+# 服務帳戶設定（用於 GKE Workload Identity）
+serviceAccount:
+  create: true
+  name: loki
+  annotations:
+    iam.gke.io/gcp-service-account: loki-gcs@incdr-infra.iam.gserviceaccount.com
+
+# Loki 主要配置
+loki:
+  auth_enabled: false
+  
+  # GCS 儲存配置
+  storage:
+    type: gcs
+    gcs:
+        bucket_name: loki-storage-log
+    bucketNames:
+      chunks: loki-storage-log
+      ruler: loki-storage-log
+      admin: loki-storage-log
+  
+  # Schema 配置
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: gcs
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+  
+  # 結構化配置
+  structuredConfig:
+    auth_enabled: false
+    
+    server:
+      http_listen_port: 3100
+      grpc_listen_port: 9095
+      log_level: info
+    
+    common:
+      path_prefix: /tmp/loki
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+    
+    ingester:
+      lifecycler:
+        ring:
+          kvstore:
+            store: inmemory
+          replication_factor: 1
+      chunk_idle_period: 30m
+      chunk_block_size: 262144
+      chunk_retain_period: 1m
+      wal:
+        enabled: true
+        dir: /tmp/loki/wal
+    
+    # 詳細 schema 配置 (高層級已在 loki.schemaConfig 中定義)
+    
+    storage_config:
+      tsdb_shipper:
+        active_index_directory: /tmp/loki/index
+        cache_location: /tmp/loki/cache
+        cache_ttl: 24h
+      # gcs bucket 已在 loki.storage 中定義
+    
+    limits_config:
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+      retention_period: 168h
+      ingestion_rate_mb: 50
+      ingestion_burst_size_mb: 100
+      per_stream_rate_limit: 5MB
+      per_stream_rate_limit_burst: 20MB
+      max_query_parallelism: 32
+      ruler_max_rules_per_rule_group: 20
+      ruler_max_rule_groups_per_tenant: 50
+    
+
+    compactor:
+      working_directory: /tmp/loki/compactor
+      delete_request_store: gcs
+      retention_enabled: true
+      retention_delete_delay: 2h
+      retention_delete_worker_count: 150
+    
+    ruler:
+      enable_api: true
+      enable_alertmanager_v2: true
+      alertmanager_url: http://grafana.monitoring.svc.cluster.local:3000
+      storage:
+        type: gcs
+        gcs:
+          bucket_name: loki-storage-log
+          enable_http2: false
+      rule_path: /tmp/loki/rules
+      # 移除 enable_remote_write 因為此字段不存在
+      wal:
+        dir: /tmp/loki/ruler-wal
+      ring:
+        kvstore:
+          store: inmemory
+
+
+# 關閉 Ingress - 改用 LoadBalancer
+ingress:
+  enabled: false
+
+# 使用 Internal LoadBalancer 不需要前端配置
+
+# 關閉測試
+test:
+  enabled: false

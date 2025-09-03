@@ -1,0 +1,56 @@
+// Grafana Alloy River config: read NGINX JSON logs from a file and push to Loki
+// Env vars used:
+// - LOKI_URL (e.g. https://loki.example.com or http://<LB-IP>:3100)
+// - NGINX_JSON_LOG (e.g. "/opt/logs/nginx/*.log")
+
+loki.source.file "nginx_json" {
+  // Tail NGINX JSON access log
+  targets = [{ __path__ = env("NGINX_JSON_LOG") }]
+  forward_to = [loki.process.nginx_json.receiver]
+}
+
+loki.process "nginx_json" {
+  stage.json {}
+
+  // Promote common fields to labels for filtering in LogQL/Grafana Explore.
+  stage.labels {
+    values = {
+      status            = "status",
+      http_host         = "http_host",
+      request_url_path  = "request_url_path",
+      method            = "method",
+      upstream_status   = "upstream_status",
+      upstream_host     = "upstream_host",
+      pro               = "pro"
+    }
+  }
+
+  // Optionally convert status to numeric for advanced matching downstream
+  // stage.template {
+  //   source = "status"
+  //   template = "{{ ToInt .Value }}"
+  // }
+
+  // You may also parse timestamp if present; here we rely on file tail time.
+  // stage.timestamp {
+  //   source = "access_time"
+  //   format = "2006-01-02T15:04:05-07:00"
+  // }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = env("LOKI_URL")
+    // If Loki requires basic auth or token, uncomment and set accordingly:
+    // basic_auth {
+    //   username = env("LOKI_USERNAME")
+    //   password = env("LOKI_PASSWORD")
+    // }
+    // bearer_token = env("LOKI_BEARER_TOKEN")
+
+    // If using self-signed certs in testing, you can disable verification (not recommended in prod):
+    // tls_insecure_skip_verify = true
+  }
+}

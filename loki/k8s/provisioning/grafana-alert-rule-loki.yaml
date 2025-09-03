@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-loki-alert-rule
+  namespace: monitoring
+  labels:
+    grafana_alert: "1"
+    app.kubernetes.io/name: grafana
+  annotations:
+    # Sidecar 會將此檔掛載到 sidecar.alerts.folder 指定的目錄
+    grafana_folder: "Loki Rules"
+data:
+  loki-error-rate.yaml: |
+    apiVersion: 1
+    groups:
+      - orgId: 1
+        name: nginx-non-200-status
+        folder: Loki Rules
+        interval: 1m
+        rules:
+          - uid: nginx-non-200
+            title: NGINX non-200 status detected
+            condition: A
+            data:
+              - refId: A
+                datasourceUid: loki
+                model:
+                  editorMode: code
+                  expr: count_over_time({source=~".*nginx.*"} | json | status!="200" [5m]) > 10
+                  queryType: range
+                  refId: A
+                  datasource:
+                    type: loki
+                    uid: loki
+            for: 2m
+            annotations:
+              summary: Detected more than 10 NGINX requests with status != 200 in last 5 minutes
+            labels:
+              severity: critical

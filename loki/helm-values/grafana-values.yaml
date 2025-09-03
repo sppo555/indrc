@@ -1,0 +1,49 @@
+# Grafana 安裝與預先佈署 Loki DataSource、啟用 Alerting Sidecar
+# 請視需求調整 admin 密碼與 Loki URL。
+
+adminUser: admin
+adminPassword: admin123 # 請於生產環境變更
+
+service:
+  type: ClusterIP
+
+# 將 K8s Secret 中的 Telegram 環境變數注入至容器（供 alerting 佈署檔引用）
+extraEnvFrom:
+  - secretRef:
+      name: grafana-telegram
+
+# 預先佈署資料來源：Loki
+# 參考：https://grafana.com/docs/grafana/latest/administration/provisioning/#datasources
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        type: loki
+        access: proxy
+        url: http://loki.loki.svc:3100 # Loki 在 loki 命名空間的 Cluster DNS
+        isDefault: true
+        uid: loki
+        jsonData: {}
+
+# 開啟 sidecar 以自動載入 Alert Rule（從具備指定 label 的 ConfigMap）
+# 參考：https://github.com/grafana/helm-charts/tree/main/charts/grafana#sidecar-for-alerts
+sidecar:
+  alerts:
+    enabled: true
+    label: grafana_alert
+    labelValue: "1"
+    searchNamespace: "ALL"
+    folder: /etc/grafana/provisioning/alerting/rules
+
+# 透過額外的 ConfigMap 掛載方式，將 Contact Points/Policies 佈署檔掛入 Grafana 的 alerting 目錄
+extraConfigmapMounts:
+  - name: grafana-alerting-provisioning
+    mountPath: /etc/grafana/provisioning/alerting/base
+    configMap: grafana-alerting-provisioning
+    readOnly: true
+
+# 可選：設定時區等
+grafana.ini:
+  date_formats:
+    default_timezone: Asia/Taipei
