@@ -4,8 +4,8 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-User=alloy
-Group=alloy
+User=nginx
+Group=nginx
 Type=simple
 EnvironmentFile=-/etc/default/alloy
 ExecStart=/usr/local/bin/alloy run /etc/alloy/config.river

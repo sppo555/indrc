@@ -6,13 +6,13 @@
 
 // Access logs (JSON format)
 loki.source.file "nginx_access" {
-  targets = [{ __path__ = env("NGINX_ACCESS_LOG") }]
+  targets = [{ __path__ = "/opt/logs/nginx/test.cc_access.log" }]
   forward_to = [loki.process.nginx_json.receiver]
 }
 
 // Error logs (text format)
 loki.source.file "nginx_error" {
-  targets = [{ __path__ = env("NGINX_ERROR_LOG") }]
+  targets = [{ __path__ = "/opt/logs/nginx/test.cc_error.log" }]
   forward_to = [loki.process.nginx_error.receiver]
 }
 
@@ -46,7 +46,7 @@ loki.process "nginx_json" {
 
   stage.timestamp {
     source = "access_time"
-    format = "2006-01-02T15:04:05-07:00"
+    format = "2006-01-02T15:04:05Z07:00"
     location = "UTC"
   }
 
@@ -92,6 +92,6 @@ loki.process "nginx_error" {
 
 loki.write "default" {
   endpoint {
-    url = env("LOKI_URL")
+    url = "http://10.11.11.215:3100/loki"
   }
 }

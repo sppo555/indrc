@@ -24,6 +24,9 @@ data:
             data:
               - refId: A
                 datasourceUid: loki
+                relativeTimeRange:
+                  from: 600
+                  to: 0
                 model:
                   editorMode: code
                   expr: count_over_time({source=~".*nginx.*"} | json | status!="200" [5m]) > 10

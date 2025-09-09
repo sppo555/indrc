@@ -52,9 +52,26 @@ else
     echo "⚠️ Alloy 服務單元文件不存在"
 fi
 
+# 同時移除可能存在的 drop-in 覆寫目錄與檔案（例如 override.conf）
+if [ -d /etc/systemd/system/alloy.service.d ]; then
+    rm -rf /etc/systemd/system/alloy.service.d
+    echo "✅ 已移除 /etc/systemd/system/alloy.service.d 及其覆寫檔"
+else
+    echo "⚠️ /etc/systemd/system/alloy.service.d 不存在"
+fi
+
+# 移除可能存在的 wants 目錄 symlink
+if [ -L /etc/systemd/system/multi-user.target.wants/alloy.service ]; then
+    rm -f /etc/systemd/system/multi-user.target.wants/alloy.service
+    echo "✅ 已移除 multi-user.target.wants/alloy.service symlink"
+fi
+
 # 重新載入 systemd
 systemctl daemon-reload
 echo "✅ systemd 已重新載入"
+
+# 清理任何可能的 failed 狀態
+systemctl reset-failed alloy 2>/dev/null || true
 
 echo -e "\n3) 移除 Alloy 二進制文件"
 if [ -f /usr/local/bin/alloy ]; then
@@ -70,7 +87,15 @@ if [ -f /usr/bin/alloy ]; then
     echo "✅ Alloy 二進制文件已從 /usr/bin 移除"
 fi
 
-echo -e "\n4) 移除 Alloy 配置目錄和文件"
+echo -e "\n4) 移除 Alloy 資料目錄 (WorkingDirectory)"
+if [ -d /var/lib/alloy ]; then
+    rm -rf /var/lib/alloy
+    echo "✅ /var/lib/alloy 已移除"
+else
+    echo "⚠️ /var/lib/alloy 不存在"
+fi
+
+echo -e "\n5) 移除 Alloy 配置目錄和文件"
 if [ -d /etc/alloy ]; then
     rm -rf /etc/alloy
     echo "✅ Alloy 配置目錄已移除"
@@ -86,7 +111,7 @@ else
     echo "⚠️ Alloy 環境變數檔不存在"
 fi
 
-echo -e "\n5) 移除 Alloy 系統用戶和群組"
+echo -e "\n6) 移除 Alloy 系統用戶和群組"
 if id -u alloy >/dev/null 2>&1; then
     userdel alloy 2>/dev/null
     echo "✅ Alloy 系統用戶已移除"
@@ -101,7 +126,7 @@ else
     echo "⚠️ Alloy 系統群組不存在"
 fi
 
-echo -e "\n6) 清除 Alloy 日誌"
+echo -e "\n7) 清除 Alloy 日誌"
 if [ -d /var/log/alloy ]; then
     rm -rf /var/log/alloy
     echo "✅ Alloy 日誌目錄已移除"
