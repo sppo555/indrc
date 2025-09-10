@@ -6,6 +6,9 @@ from googleapiclient.discovery import build
 import subprocess
 from google.cloud import service_usage_v1
 import argparse
+import google.auth
+from google.oauth2.credentials import Credentials as UserCredentials
+from datetime import datetime
 
 def resolve_credentials_path(cli_path=None):
     """Resolves the credentials path in a robust way."""
@@ -34,17 +37,34 @@ def resolve_credentials_path(cli_path=None):
             
     return None # Return None if not found
 
-def get_all_projects():
-    """Lists all projects using the gcloud command without changing the active user account."""
+def get_active_gcloud_account():
+    """Returns the active gcloud account email, or None if unavailable."""
+    try:
+        result = subprocess.run(
+            'gcloud auth list --format="value(account)" --filter=status:ACTIVE',
+            shell=True,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        acct = result.stdout.strip()
+        return acct if acct else None
+    except subprocess.CalledProcessError:
+        return None
+
+def get_all_projects(credentials_override_path=None):
+    """Lists all projects using the gcloud command.
+    If credentials_override_path is provided, uses that key via CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE.
+    Otherwise, uses the current active gcloud user account (ADC).
+    """
     print("Fetching all accessible projects using 'gcloud'...")
     try:
-        key_file = resolve_credentials_path()
-        if not key_file:
-            raise FileNotFoundError("Could not find service account key file.")
-
-        # Use an environment variable to specify credentials for this command only
         my_env = os.environ.copy()
-        my_env["CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"] = key_file
+        if credentials_override_path:
+            if not os.path.isfile(credentials_override_path):
+                raise FileNotFoundError("Could not find service account key file.")
+            # Use an environment variable to specify credentials for this command only
+            my_env["CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"] = credentials_override_path
 
         list_command = 'gcloud projects list --format="value(projectId)"'
         result = subprocess.run(
@@ -177,20 +197,73 @@ def main():
         help='Path to the GCP service account credentials JSON file.',
         default=None
     )
+    # Deprecated in favor of --mode, but kept for backward compatibility
+    parser.add_argument(
+        '--auth', choices=['service_account', 'gcloud'], default=None,
+        help='[Deprecated] Use --mode instead. Authentication source: service_account uses a JSON key; gcloud uses your active gcloud user.'
+    )
+    parser.add_argument(
+        '--mode', choices=['service_account', 'gcloud'], default='service_account',
+        help='Execution mode: service_account uses a JSON key; gcloud uses your current gcloud user (no extra login needed).'
+    )
     args = parser.parse_args()
 
-    credentials_path = resolve_credentials_path(args.credentials)
-
-    if not credentials_path:
-        print("Error: Credentials file not found.")
-        print("Please provide the path using the --credentials flag, or set the GOOGLE_APPLICATION_CREDENTIALS environment variable.")
-        return
-
     try:
-        print(f"Using credentials file: {credentials_path}")
-        credentials = service_account.Credentials.from_service_account_file(credentials_path)
-        
-        project_ids = get_all_projects()
+        # Determine mode: --mode takes precedence; fallback to --auth if provided
+        mode = args.mode if args.mode else (args.auth or 'service_account')
+        print(f"Mode: {mode}")
+        if mode == 'gcloud':
+            active_acct = get_active_gcloud_account()
+            if active_acct:
+                print(f"Gcloud Account: {active_acct}")
+            else:
+                print("Gcloud Account: <unknown>")
+            print("Using gcloud user credentials (access token from gcloud auth).")
+            # Get an access token from the active gcloud account to avoid requiring ADC login
+            try:
+                token_result = subprocess.run(
+                    'gcloud auth print-access-token',
+                    shell=True,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                access_token = token_result.stdout.strip()
+                if not access_token:
+                    raise RuntimeError('Failed to obtain access token from gcloud.')
+            except subprocess.CalledProcessError as e:
+                print("Error: Failed to get access token from gcloud.\nStderr:")
+                print(e.stderr)
+                return
+
+            credentials = UserCredentials(token=access_token)
+            project_ids = get_all_projects(credentials_override_path=None)
+        else:
+            credentials_path = resolve_credentials_path(args.credentials)
+            if not credentials_path:
+                print("Error: Credentials file not found.")
+                print("Please provide the path using the --credentials flag, or set the GOOGLE_APPLICATION_CREDENTIALS environment variable.")
+                return
+            print(f"Using credentials file: {credentials_path}")
+            credentials = service_account.Credentials.from_service_account_file(credentials_path)
+            # Try to show service account email
+            sa_email = None
+            try:
+                sa_email = getattr(credentials, 'service_account_email', None)
+            except Exception:
+                sa_email = None
+            if not sa_email:
+                try:
+                    with open(credentials_path, 'r') as f:
+                        key_info = json.load(f)
+                        sa_email = key_info.get('client_email')
+                except Exception:
+                    sa_email = None
+            if sa_email:
+                print(f"Service Account: {sa_email}")
+            else:
+                print("Service Account: <unknown>")
+            project_ids = get_all_projects(credentials_override_path=credentials_path)
         project_statuses = []
         compute_service = build('compute', 'v1', credentials=credentials)
 
@@ -217,14 +290,16 @@ def main():
             final_columns = [col for col in optimized_columns if col in ip_df.columns]
             ip_df = ip_df[final_columns]
 
-            ip_filename = 'gcp_all_ips.csv'
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            ip_filename = f'gcp_all_ips_{timestamp}.csv'
             ip_df.to_csv(ip_filename, index=False)
             print(f"\nSuccessfully saved a total of {len(ip_df)} IP addresses to {ip_filename}")
 
         # Create and save the project status report
         if project_statuses:
             status_df = pd.DataFrame(project_statuses)
-            status_filename = 'gcp_projects_status.csv'
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            status_filename = f'gcp_projects_status_{timestamp}.csv'
             status_df.to_csv(status_filename, index=False)
             print(f"\nSuccessfully saved status of {len(status_df)} projects to {status_filename}")
 
