@@ -5,15 +5,44 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import subprocess
 from google.cloud import service_usage_v1
+import argparse
+
+def resolve_credentials_path(cli_path=None):
+    """Resolves the credentials path in a robust way."""
+    # 1. Prioritize the path from the command-line argument
+    if cli_path and os.path.isfile(cli_path):
+        return cli_path
+
+    # 2. Check common environment variables
+    env_override = os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or os.getenv("GCP_SA_KEY_PATH")
+    if env_override and os.path.isfile(env_override):
+        print(f"Found credentials in environment variable: {env_override}")
+        return env_override
+
+    # 3. Check common relative and absolute paths
+    base_dir = os.path.dirname(__file__)
+    candidates = [
+        os.path.join(base_dir, 'incdr-infra.json'),
+        os.path.join(base_dir, '..', 'incdr-infra.json'),
+        os.path.expanduser('~/Documents/incdr-infra.json'),
+        os.path.expanduser('~/incdr-infra.json'),
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            print(f"Found credentials at common path: {p}")
+            return p
+            
+    return None # Return None if not found
 
 def get_all_projects():
     """Lists all projects using the gcloud command without changing the active user account."""
     print("Fetching all accessible projects using 'gcloud'...")
     try:
-        key_file = os.path.join(os.path.dirname(__file__), '..', 'incdr-infra.json')
-        
+        key_file = resolve_credentials_path()
+        if not key_file:
+            raise FileNotFoundError("Could not find service account key file.")
+
         # Use an environment variable to specify credentials for this command only
-        # This avoids changing the user's active gcloud configuration
         my_env = os.environ.copy()
         my_env["CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"] = key_file
 
@@ -142,41 +171,55 @@ def get_ips_for_project(project_id, compute_service):
 
 def main():
     """Main function to orchestrate fetching IPs from all projects."""
-    credentials_path = os.path.join(os.path.dirname(__file__), '..', 'incdr-infra.json')
-    try:
-        with open(credentials_path, 'r') as f:
-            creds_json = json.load(f)
-            client_email = creds_json.get('client_email', 'Service account email not found.')
-            print(f"Running with service account: {client_email}")
+    parser = argparse.ArgumentParser(description='GCP IP Address Collector.')
+    parser.add_argument(
+        '-c', '--credentials',
+        help='Path to the GCP service account credentials JSON file.',
+        default=None
+    )
+    args = parser.parse_args()
 
+    credentials_path = resolve_credentials_path(args.credentials)
+
+    if not credentials_path:
+        print("Error: Credentials file not found.")
+        print("Please provide the path using the --credentials flag, or set the GOOGLE_APPLICATION_CREDENTIALS environment variable.")
+        return
+
+    try:
+        print(f"Using credentials file: {credentials_path}")
         credentials = service_account.Credentials.from_service_account_file(credentials_path)
         
         project_ids = get_all_projects()
         project_statuses = []
         compute_service = build('compute', 'v1', credentials=credentials)
 
+        all_project_ips = []
         for project_id in project_ids:
             api_enabled = is_api_enabled(project_id, credentials)
             if api_enabled:
                 project_statuses.append({'project_id': project_id, 'compute_api_status': 'ENABLED'})
                 project_ips = get_ips_for_project(project_id, compute_service)
-                
                 if project_ips:
-                    ip_df = pd.DataFrame(project_ips)
-                    # Optimize column order, removing project_id as it's in the filename
-                    optimized_columns = [
-                        'ip_address', 'name', 'access_type', 'status', 'region',
-                        'source', 'user', 'ip_version'
-                    ]
-                    final_columns = [col for col in optimized_columns if col in ip_df.columns]
-                    ip_df = ip_df[final_columns]
-                    
-                    ip_filename = f'{project_id}_ips.csv'
-                    ip_df.to_csv(ip_filename, index=False)
-                    print(f"Successfully saved {len(ip_df)} IP addresses for {project_id} to {ip_filename}")
+                    all_project_ips.extend(project_ips)
             else:
                 print(f"\n--- Skipping project: {project_id} (Compute Engine API not enabled) ---")
                 project_statuses.append({'project_id': project_id, 'compute_api_status': 'DISABLED'})
+
+        # Save all collected IPs to a single file
+        if all_project_ips:
+            ip_df = pd.DataFrame(all_project_ips)
+            # Optimize column order, keeping project_id for identification
+            optimized_columns = [
+                'project_id', 'ip_address', 'name', 'access_type', 'status', 'region',
+                'source', 'user', 'ip_version'
+            ]
+            final_columns = [col for col in optimized_columns if col in ip_df.columns]
+            ip_df = ip_df[final_columns]
+
+            ip_filename = 'gcp_all_ips.csv'
+            ip_df.to_csv(ip_filename, index=False)
+            print(f"\nSuccessfully saved a total of {len(ip_df)} IP addresses to {ip_filename}")
 
         # Create and save the project status report
         if project_statuses:
