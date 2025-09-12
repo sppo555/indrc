@@ -23,7 +23,7 @@ CONFIG = {
     'max_retries': 3,
     'retry_delay': 2,
     'whois_timeout': 2,
-    'warning_days': 300,  # 預設300天內過期會警告
+    'warning_days': 30,  # 預設300天內過期會警告
     'target_fields': [
         'Registrar:',
         'Registrar WHOIS Server:',
