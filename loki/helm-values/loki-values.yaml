@@ -142,7 +142,7 @@ loki:
     
     limits_config:
       reject_old_samples: true
-      reject_old_samples_max_age: 168h
+      reject_old_samples_max_age: 1680h
       retention_period: 168h
       ingestion_rate_mb: 50
       ingestion_burst_size_mb: 100

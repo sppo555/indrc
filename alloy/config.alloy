@@ -1,0 +1,88 @@
+logging {
+  level  = "debug"
+  format = "logfmt"
+}
+
+loki.source.file "nginx" {
+  targets = [
+    {
+      __path__ = "/opt/logs/nginx/www.starstar123.com_access.log",
+      job      = "nginx-access",
+      host     = env("HOSTNAME"),
+    },
+  ]
+  forward_to = [loki.process.nginx_json.receiver]
+}
+
+loki.process "nginx_json" {
+  forward_to = [loki.write.default.receiver]
+
+  // 解析 JSON 格式的 nginx 日志
+  stage.json {
+    expressions = {
+      access_time              = "access_time",
+      remote_addr              = "remote_addr",
+      x_forward_for            = "x_forward_for",
+      method                   = "method",
+      request_url_path         = "request_url_path",
+      request_url              = "request_url",
+      status                   = "status",
+      request_time             = "request_time",
+      request_length           = "request_length",
+      upstream_host            = "upstream_host",
+      upstream_response_length = "upstream_response_length",
+      upstream_response_time   = "upstream_response_time",
+      upstream_status          = "upstream_status",
+      http_referer             = "http_referer",
+      remote_user              = "remote_user",
+      http_user_agent          = "http_user_agent",
+      appkey                   = "appkey",
+      upstream_addr            = "upstream_addr",
+      http_host                = "http_host",
+      pro                      = "pro",
+      request_id               = "request_id",
+      bytes_sent               = "bytes_sent",
+    }
+  }
+
+  // 從 filename 提取 site，例如 abc.starstar123.com_access.log → site=abc.starstar123.com
+  stage.regex {
+    expression = ".*/(?P<site>[^/]+)_access.log$"
+    source     = "filename"
+  }
+
+  // 設定標籤
+  stage.labels {
+    values = {
+      job      = "",
+      site     = "site",
+      method   = "method",
+      status   = "status",
+      host     = "http_host",
+    }
+  }
+
+  // 解析 status_class (2xx, 4xx, 5xx)
+  stage.regex {
+    expression = "^(?P<status_class>\\d)\\d\\d$"
+    source     = "status"
+  }
+
+  stage.labels {
+    values = {
+      status_class = "status_class",
+    }
+  }
+
+  // 使用 access_time 作為 timestamp
+  stage.timestamp {
+    source = "access_time"
+    format = "2006-01-02T15:04:05Z07:00"
+  }
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://10.11.11.215:3100/loki/api/v1/push"
+  }
+}
