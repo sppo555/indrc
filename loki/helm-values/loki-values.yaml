@@ -153,7 +153,9 @@ loki:
       max_query_parallelism: 32
       ruler_max_rules_per_rule_group: 20
       ruler_max_rule_groups_per_tenant: 50
-    
+      max_query_series: 10000
+      max_entries_limit_per_query: 50000
+      max_query_range: 480h    
 
     compactor:
       working_directory: /tmp/loki/compactor

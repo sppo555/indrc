@@ -9,6 +9,10 @@
 <body>
     <div class="container mt-5">
         <h1>GCP IP Addresses and Project Status</h1>
+        <div class="mb-3">
+            <label for="dateInput" class="form-label">輸入 CSV 文件日期時間 (格式: YYYYMMDD_HHMMSS)</label>
+            <input type="text" id="dateInput" class="form-control" placeholder="例如: 20250917_112240" value="20250917_112941">
+        </div>
         <h2>IP Addresses</h2>
         <table id="ipsTable" class="table table-striped">
             <thead>
@@ -109,11 +113,31 @@
             container.innerHTML = html;
         }
 
+        // Function to generate date string for file names
+        function generateDateStr() {
+            let now = new Date();
+            let year = now.getFullYear();
+            let month = String(now.getMonth() + 1).padStart(2, '0');
+            let day = String(now.getDate()).padStart(2, '0');
+            let hours = String(now.getHours()).padStart(2, '0');
+            let minutes = String(now.getMinutes()).padStart(2, '0');
+            let seconds = String(now.getSeconds()).padStart(2, '0');
+            return year + month + day + '_' + hours + minutes + seconds;
+        }
+
         // Load the CSVs
-        loadCSV('gcp_all_ips_20250910_163854.csv', 'ipsBody', function(data) {
+        let dateInput = document.getElementById('dateInput');
+        let dateStr = dateInput.value || generateDateStr();
+        loadCSV('gcp_all_ips_' + dateStr + '.csv', 'ipsBody', function(data) {
             displayGroupedIPs(data);
         });
-        loadCSV('gcp_projects_status_20250910_163854.csv', 'projectsBody');
+        loadCSV('gcp_projects_status_' + dateStr + '.csv', 'projectsBody');
+
+        // Update dateStr when input changes
+        dateInput.addEventListener('input', function() {
+            dateStr = this.value || generateDateStr();
+            // Reload CSVs if needed, but for simplicity, user can refresh page
+        });
     </script>
 </body>
 </html>
