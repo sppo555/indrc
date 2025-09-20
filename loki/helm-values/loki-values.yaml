@@ -11,11 +11,11 @@ singleBinary:
     enabled: false
   resources:
     requests:
-      cpu: 200m
-      memory: 512Mi
+      cpu: 500m       # 增加到500m，原本是200m
+      memory: 1Gi     # 增加到1Gi，原本是512Mi
     limits:
-      cpu: 2
-      memory: 4Gi
+      cpu: 2          # 設定CPU上限
+      memory: 4Gi     # 設定內存上限
   # 服務配置 - 使用內部 LoadBalancer 而非 Ingress
   service:
     type: LoadBalancer
@@ -110,6 +110,11 @@ loki:
       http_listen_port: 3100
       grpc_listen_port: 9095
       log_level: info
+      http_server_read_timeout: 300s    # 增加讀取超時，默認為30s
+      http_server_write_timeout: 300s   # 增加寫入超時，默認為30s
+      http_server_idle_timeout: 300s    # 增加空閒超時，默認為120s
+      grpc_server_max_recv_msg_size: 104857600  # 增大接收消息大小限制到~100MB
+      grpc_server_max_send_msg_size: 104857600  # 增大發送消息大小限制到~100MB
     
     common:
       path_prefix: /tmp/loki
@@ -131,7 +136,12 @@ loki:
         enabled: true
         dir: /tmp/loki/wal
     
-    # 詳細 schema 配置 (高層級已在 loki.schemaConfig 中定義)
+    frontend:
+      max_outstanding_per_tenant: 2048
+      compress_responses: true
+      log_queries_longer_than: 10s
+      query_stats_enabled: true
+    # 詳細 schema 配置 (high-level has already been defined in loki.schemaConfig) 中定義)
     
     storage_config:
       tsdb_shipper:
@@ -154,8 +164,11 @@ loki:
       ruler_max_rules_per_rule_group: 20
       ruler_max_rule_groups_per_tenant: 50
       max_query_series: 10000
-      max_entries_limit_per_query: 50000
-      max_query_range: 480h    
+      max_entries_limit_per_query: 100000   # 增加到100000，原本是50000
+      max_query_range: 480h
+      query_timeout: 300s                   # 增加查詢超時時間，默認為1m
+      # max_concurrent_queries: 16 字段在Loki 3.5.3中不支持，已移除
+      split_queries_by_interval: 30m        # 按30分鐘間隔拆分查詢
 
     compactor:
       working_directory: /tmp/loki/compactor
