@@ -11,7 +11,20 @@
         <h1>GCP IP Addresses and Project Status</h1>
         <div class="mb-3">
             <label for="dateInput" class="form-label">輸入 CSV 文件日期時間 (格式: YYYYMMDD_HHMMSS)</label>
-            <input type="text" id="dateInput" class="form-control" placeholder="例如: 20250917_112240" value="20250917_112941">
+            <input type="text" id="dateInput" class="form-control" placeholder="例如: 20250917_145110">
+        </div>
+        <div class="mb-4">
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <label for="ipsFile" class="form-label">上傳 IP CSV 檔 (gcp_all_ips_*.csv)</label>
+                    <input type="file" id="ipsFile" class="form-control" accept=".csv">
+                </div>
+                <div class="col-md-6">
+                    <label for="projectsFile" class="form-label">上傳 Project Status CSV 檔 (gcp_projects_status_*.csv)</label>
+                    <input type="file" id="projectsFile" class="form-control" accept=".csv">
+                </div>
+            </div>
+            <div class="form-text">提示：若不啟動伺服器，直接在此上傳 CSV 即可解析；若使用日期輸入，則需在伺服器情境下以 fetch 讀取檔案。</div>
         </div>
         <h2>IP Addresses</h2>
         <table id="ipsTable" class="table table-striped">
@@ -31,6 +44,8 @@
             <tbody id="ipsBody">
             </tbody>
         </table>
+        <h2>Grouped IPs</h2>
+        <div id="groupedIPs" class="mb-4"></div>
         <h2>Project Status</h2>
         <table id="projectsTable" class="table table-striped">
             <thead>
@@ -67,9 +82,9 @@
                     Papa.parse(data, {
                         header: true,
                         complete: function(results) {
-                            if (tableBodyId === 'ipsBody') {
-                                // Original table
-                                const tbody = document.getElementById(tableBodyId);
+                            // Populate table for given tbody id (works for both IPs and Projects)
+                            const tbody = document.getElementById(tableBodyId);
+                            if (tbody) {
                                 results.data.forEach(row => {
                                     const tr = document.createElement('tr');
                                     Object.values(row).forEach(value => {
@@ -85,6 +100,28 @@
                     });
                 })
                 .catch(error => console.error('Error loading CSV:', error));
+        }
+
+        // Function to parse CSV from an uploaded File object
+        function parseCSVFromFile(file, tableBodyId, callback) {
+            Papa.parse(file, {
+                header: true,
+                complete: function(results) {
+                    const tbody = document.getElementById(tableBodyId);
+                    if (tbody) {
+                        results.data.forEach(row => {
+                            const tr = document.createElement('tr');
+                            Object.values(row).forEach(value => {
+                                const td = document.createElement('td');
+                                td.textContent = value;
+                                tr.appendChild(td);
+                            });
+                            tbody.appendChild(tr);
+                        });
+                    }
+                    if (callback) callback(results.data, file.name);
+                }
+            });
         }
 
         // Function to display grouped and sorted IPs
@@ -125,18 +162,74 @@
             return year + month + day + '_' + hours + minutes + seconds;
         }
 
-        // Load the CSVs
-        let dateInput = document.getElementById('dateInput');
-        let dateStr = dateInput.value || generateDateStr();
-        loadCSV('gcp_all_ips_' + dateStr + '.csv', 'ipsBody', function(data) {
-            displayGroupedIPs(data);
-        });
-        loadCSV('gcp_projects_status_' + dateStr + '.csv', 'projectsBody');
+        // Initialize and persist date input, auto-reload on change
+        document.addEventListener('DOMContentLoaded', function() {
+            const dateInput = document.getElementById('dateInput');
+            const saved = localStorage.getItem('csvDate');
+            if (saved) {
+                dateInput.value = saved;
+            }
 
-        // Update dateStr when input changes
-        dateInput.addEventListener('input', function() {
-            dateStr = this.value || generateDateStr();
-            // Reload CSVs if needed, but for simplicity, user can refresh page
+            function clearTable(id) {
+                const tbody = document.getElementById(id);
+                if (tbody) tbody.innerHTML = '';
+            }
+
+            function loadAll(dateStr) {
+                if (!dateStr) return;
+                clearTable('ipsBody');
+                clearTable('projectsBody');
+                loadCSV('gcp_all_ips_' + dateStr + '.csv', 'ipsBody', function(data) {
+                    displayGroupedIPs(data);
+                });
+                loadCSV('gcp_projects_status_' + dateStr + '.csv', 'projectsBody');
+            }
+
+            if (dateInput.value) {
+                loadAll(dateInput.value.trim());
+            }
+
+            dateInput.addEventListener('input', function() {
+                const v = this.value.trim();
+                localStorage.setItem('csvDate', v);
+                loadAll(v);
+            });
+
+            // File inputs for direct CSV upload (no server needed)
+            const ipsFileInput = document.getElementById('ipsFile');
+            const projectsFileInput = document.getElementById('projectsFile');
+
+            function extractDateFromName(name) {
+                const m = name.match(/(\d{8}_\d{6})/);
+                return m ? m[1] : null;
+            }
+
+            ipsFileInput.addEventListener('change', function() {
+                const f = this.files && this.files[0];
+                if (!f) return;
+                clearTable('ipsBody');
+                parseCSVFromFile(f, 'ipsBody', function(data, fname) {
+                    displayGroupedIPs(data);
+                    const d = extractDateFromName(fname);
+                    if (d) {
+                        dateInput.value = d;
+                        localStorage.setItem('csvDate', d);
+                    }
+                });
+            });
+
+            projectsFileInput.addEventListener('change', function() {
+                const f = this.files && this.files[0];
+                if (!f) return;
+                clearTable('projectsBody');
+                parseCSVFromFile(f, 'projectsBody', function(_, fname) {
+                    const d = extractDateFromName(fname);
+                    if (d) {
+                        dateInput.value = d;
+                        localStorage.setItem('csvDate', d);
+                    }
+                });
+            });
         });
     </script>
 </body>
