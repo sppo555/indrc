@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DNS 可訪問性儀表板</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8fafc;
+        }
+        .badge-status {
+            font-size: 0.85rem;
+        }
+        .table-responsive {
+            max-height: 65vh;
+            overflow: auto;
+        }
+        .text-small {
+            font-size: 0.85rem;
+        }
+        .filter-group label {
+            font-weight: 600;
+        }
+        .sticky-header thead th {
+            position: sticky;
+            top: 0;
+            background: #fff;
+            z-index: 5;
+        }
+        .sortable { cursor: pointer; user-select: none; }
+        .sort-indicator { margin-left: 4px; opacity: .6; }
+        th.sorted-asc .sort-indicator::after { content: '▲'; font-size: .65rem; }
+        th.sorted-desc .sort-indicator::after { content: '▼'; font-size: .65rem; }
+    </style>
+</head>
+<body>
+    <div class="container py-4">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-3 mb-4">
+            <div>
+                <h1 class="h3 mb-1">DNS 可訪問性監控</h1>
+                <p class="text-muted mb-0" id="dataSourceLabel">資料來源：尚未載入</p>
+            </div>
+            <div>
+                <label class="btn btn-primary mb-0">
+                    載入 CSV
+                    <input type="file" id="fileInput" accept=".csv" hidden>
+                </label>
+            </div>
+        </div>
+
+        <div class="row g-3 mb-4" id="summaryCards">
+            <div class="col-6 col-md-3">
+                <div class="card border-primary border-2">
+                    <div class="card-body">
+                        <p class="text-muted text-small mb-1">總記錄數</p>
+                        <h2 class="h4 mb-0" id="totalCount">-</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="card border-success border-2">
+                    <div class="card-body">
+                        <p class="text-muted text-small mb-1">80 端口可訪問</p>
+                        <h2 class="h4 mb-0" id="port80Count">-</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="card border-success border-2">
+                    <div class="card-body">
+                        <p class="text-muted text-small mb-1">443 端口可訪問</p>
+                        <h2 class="h4 mb-0" id="port443Count">-</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="card border-warning border-2">
+                    <div class="card-body">
+                        <p class="text-muted text-small mb-1">憑證已過期</p>
+                        <h2 class="h4 mb-0" id="expiredCount">-</h2>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-body">
+                <div class="row g-3 filter-group">
+                    <div class="col-12 col-md-3">
+                        <label for="domainFilter" class="form-label">篩選 Domain</label>
+                        <select id="domainFilter" class="form-select">
+                            <option value="">全部</option>
+                        </select>
+                    </div>
+                    <div class="col-12 col-md-3">
+                        <label for="recordTypeFilter" class="form-label">記錄類型</label>
+                        <select id="recordTypeFilter" class="form-select">
+                            <option value="">全部</option>
+                            <option value="A">A</option>
+                            <option value="CNAME">CNAME</option>
+                        </select>
+                    </div>
+                    <div class="col-12 col-md-2">
+                        <label class="form-label">HTTP</label>
+                        <select id="port80Filter" class="form-select">
+                            <option value="">全部</option>
+                            <option value="true">只看可訪問</option>
+                            <option value="false">只看不可訪問</option>
+                        </select>
+                    </div>
+                    <div class="col-12 col-md-2">
+                        <label class="form-label">HTTPS</label>
+                        <select id="port443Filter" class="form-select">
+                            <option value="">全部</option>
+                            <option value="true">只看可訪問</option>
+                            <option value="false">只看不可訪問</option>
+                        </select>
+                    </div>
+                    <div class="col-12 col-md-2">
+                        <label class="form-label">自簽憑證</label>
+                        <select id="selfSignedFilter" class="form-select">
+                            <option value="">全部</option>
+                            <option value="true">只看自簽</option>
+                            <option value="false">只看非自簽</option>
+                        </select>
+                    </div>
+                    <div class="col-12 col-md-2">
+                        <label class="form-label">關鍵字</label>
+                        <input type="text" id="searchInput" class="form-control" placeholder="搜尋 record_name / IP / 錯誤">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle sticky-header" id="resultTable">
+                <thead class="table-light">
+                    <tr>
+                        <th class="sortable" data-key="project_id">Project<span class="sort-indicator"></span></th>
+                        <th class="sortable" data-key="domain_name">Domain<span class="sort-indicator"></span></th>
+                        <th class="sortable" data-key="record_name">Record Name<span class="sort-indicator"></span></th>
+                        <th class="sortable" data-key="record_type">Type<span class="sort-indicator"></span></th>
+                        <th class="sortable" data-key="record_value">IP / Value<span class="sort-indicator"></span></th>
+                        <th class="sortable" data-key="port_80_accessible">HTTP<span class="sort-indicator"></span></th>
+                        <th class="sortable" data-key="port_443_accessible">HTTPS<span class="sort-indicator"></span></th>
+                        <th class="sortable" data-key="ssl_certificate">SSL<span class="sort-indicator"></span></th>
+                        <th class="sortable" data-key="self_signed">自簽<span class="sort-indicator"></span></th>
+                        <th class="sortable" data-key="cert_expiry_date">憑證到期<span class="sort-indicator"></span></th>
+                        <th class="sortable" data-key="days_until_expiry">剩餘天數<span class="sort-indicator"></span></th>
+                        <th class="sortable text-small" data-key="port_80_error">80 Error<span class="sort-indicator"></span></th>
+                        <th class="sortable text-small" data-key="port_443_error">443 Error<span class="sort-indicator"></span></th>
+                        <th class="sortable text-small" data-key="cert_error">Cert Error<span class="sort-indicator"></span></th>
+                    </tr>
+                </thead>
+                <tbody id="resultBody"></tbody>
+            </table>
+        </div>
+
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+    <script>
+        let rawData = [];
+        let sortState = { key: null, dir: 'asc' };
+        const columnDefs = {
+            project_id: { type: 'string' },
+            domain_name: { type: 'string' },
+            record_name: { type: 'string' },
+            record_type: { type: 'string' },
+            record_value: { type: 'string' },
+            port_80_accessible: { type: 'bool' },
+            port_443_accessible: { type: 'bool' },
+            ssl_certificate: { type: 'bool' },
+            self_signed: { type: 'bool' },
+            cert_expiry_date: { type: 'string' },
+            days_until_expiry: { type: 'number' },
+            port_80_error: { type: 'string' },
+            port_443_error: { type: 'string' },
+            cert_error: { type: 'string' }
+        };
+
+        const elements = {
+            resultBody: document.getElementById('resultBody'),
+            domainFilter: document.getElementById('domainFilter'),
+            recordTypeFilter: document.getElementById('recordTypeFilter'),
+            port80Filter: document.getElementById('port80Filter'),
+            port443Filter: document.getElementById('port443Filter'),
+            selfSignedFilter: document.getElementById('selfSignedFilter'),
+            searchInput: document.getElementById('searchInput'),
+            totalCount: document.getElementById('totalCount'),
+            port80Count: document.getElementById('port80Count'),
+            port443Count: document.getElementById('port443Count'),
+            expiredCount: document.getElementById('expiredCount'),
+            fileInput: document.getElementById('fileInput'),
+            dataSourceLabel: document.getElementById('dataSourceLabel')
+        };
+
+        function parseBool(value) {
+            if (value === undefined || value === null) return null;
+            if (typeof value === 'boolean') return value;
+            const str = String(value).trim().toLowerCase();
+            if (str === 'true') return true;
+            if (str === 'false') return false;
+            return null;
+        }
+
+        function enhanceRowWithDerivedFields(row) {
+            const enhanced = { ...row };
+            if (enhanced.self_signed === undefined || enhanced.self_signed === null || enhanced.self_signed === '') {
+                const verifyCode = Number(enhanced.cert_verify_code);
+                const verifyError = (enhanced.cert_verify_error || enhanced.cert_error || '').toLowerCase();
+                if ([18, 19, 20, 21].includes(verifyCode)) {
+                    enhanced.self_signed = true;
+                } else if (verifyError.includes('self signed')) {
+                    enhanced.self_signed = true;
+                }
+            }
+            return enhanced;
+        }
+
+        function formatBooleanBadge(value, trueLabel = '可', falseLabel = '不可') {
+            if (value === true) {
+                return '<span class="badge bg-success badge-status">' + trueLabel + '</span>';
+            }
+            if (value === false) {
+                return '<span class="badge bg-danger badge-status">' + falseLabel + '</span>';
+            }
+            return '<span class="badge bg-secondary badge-status">未知</span>';
+        }
+
+        function updateSummary(data) {
+            const total = data.length;
+            const port80Ok = data.filter(row => parseBool(row.port_80_accessible) === true).length;
+            const port443Ok = data.filter(row => parseBool(row.port_443_accessible) === true).length;
+            const expired = data.filter(row => {
+                const days = Number(row.days_until_expiry);
+                return !isNaN(days) && days < 0;
+            }).length;
+
+            elements.totalCount.textContent = total;
+            elements.port80Count.textContent = port80Ok;
+            elements.port443Count.textContent = port443Ok;
+            elements.expiredCount.textContent = expired;
+        }
+
+        function buildDomainFilter(data) {
+            const domains = Array.from(new Set(data.map(row => row.domain_name).filter(Boolean))).sort();
+            const fragment = document.createDocumentFragment();
+            const defaultOption = document.createElement('option');
+            defaultOption.value = '';
+            defaultOption.textContent = '全部';
+            fragment.appendChild(defaultOption);
+            domains.forEach(domain => {
+                const option = document.createElement('option');
+                option.value = domain;
+                option.textContent = domain;
+                fragment.appendChild(option);
+            });
+            elements.domainFilter.innerHTML = '';
+            elements.domainFilter.appendChild(fragment);
+        }
+
+        function renderTable(data) {
+            elements.resultBody.innerHTML = '';
+            const fragment = document.createDocumentFragment();
+            data.forEach(row => {
+                const tr = document.createElement('tr');
+                const fields = [
+                    row.project_id,
+                    row.domain_name,
+                    row.record_name,
+                    row.record_type,
+                    row.record_value,
+                    formatBooleanBadge(parseBool(row.port_80_accessible)),
+                    formatBooleanBadge(parseBool(row.port_443_accessible)),
+                    formatBooleanBadge(parseBool(row.ssl_certificate), '有', '無'),
+                    formatBooleanBadge(parseBool(row.self_signed), '是', '否'),
+                    row.cert_expiry_date || '',
+                    row.days_until_expiry || '',
+                    row.port_80_error || '',
+                    row.port_443_error || '',
+                    row.cert_error || ''
+                ];
+
+                fields.forEach((value, index) => {
+                    const td = document.createElement('td');
+                    if (index >= 5 && index <= 8) {
+                        td.innerHTML = value;
+                        td.classList.add('text-center');
+                    } else {
+                        td.textContent = value;
+                    }
+                    tr.appendChild(td);
+                });
+                fragment.appendChild(tr);
+            });
+            elements.resultBody.appendChild(fragment);
+        }
+
+        function applyFilters() {
+            const domain = elements.domainFilter.value;
+            const recordType = elements.recordTypeFilter.value;
+            const port80 = elements.port80Filter.value;
+            const port443 = elements.port443Filter.value;
+            const selfSigned = elements.selfSignedFilter.value;
+            const keyword = elements.searchInput.value.trim().toLowerCase();
+
+            let filtered = rawData.filter(row => {
+                if (domain && row.domain_name !== domain) return false;
+                if (recordType && row.record_type !== recordType) return false;
+
+                const port80Val = parseBool(row.port_80_accessible);
+                if (port80 && String(port80Val) !== port80) return false;
+
+                const port443Val = parseBool(row.port_443_accessible);
+                if (port443 && String(port443Val) !== port443) return false;
+
+                const selfSignedVal = parseBool(row.self_signed);
+                if (selfSigned && String(selfSignedVal) !== selfSigned) return false;
+
+                if (keyword) {
+                    const valuesToSearch = [
+                        row.record_name,
+                        row.record_value,
+                        row.port_80_error,
+                        row.port_443_error,
+                        row.cert_error,
+                        row.cert_issuer,
+                        row.cert_subject
+                    ]
+                        .filter(Boolean)
+                        .map(String)
+                        .join(' ')
+                        .toLowerCase();
+                    if (!valuesToSearch.includes(keyword)) return false;
+                }
+                return true;
+            });
+
+            // 排序（在篩選後進行）
+            if (sortState.key) {
+                const def = columnDefs[sortState.key] || { type: 'string' };
+                const dir = sortState.dir === 'asc' ? 1 : -1;
+                filtered = filtered.slice().sort((a, b) => {
+                    let av = a[sortState.key];
+                    let bv = b[sortState.key];
+                    switch (def.type) {
+                        case 'number':
+                            av = Number(av); bv = Number(bv);
+                            if (isNaN(av)) av = 0; if (isNaN(bv)) bv = 0;
+                            return (av - bv) * dir;
+                        case 'bool':
+                            av = parseBool(av); bv = parseBool(bv);
+                            // true > false
+                            return ((av === bv) ? 0 : (av ? 1 : -1)) * dir;
+                        default:
+                            av = (av ?? '').toString().toLowerCase();
+                            bv = (bv ?? '').toString().toLowerCase();
+                            return av.localeCompare(bv) * dir;
+                    }
+                });
+            }
+
+            renderTable(filtered);
+            updateSummary(filtered);
+            updateHeaderSortStyles();
+        }
+
+        function updateHeaderSortStyles() {
+            const ths = document.querySelectorAll('#resultTable thead th.sortable');
+            ths.forEach(th => {
+                th.classList.remove('sorted-asc', 'sorted-desc');
+                const key = th.getAttribute('data-key');
+                if (key === sortState.key) {
+                    th.classList.add(sortState.dir === 'asc' ? 'sorted-asc' : 'sorted-desc');
+                }
+            });
+        }
+
+        function setDataSourceLabel(fileName) {
+            elements.dataSourceLabel.textContent = fileName
+                ? `資料來源：${fileName}`
+                : '資料來源：尚未載入';
+        }
+
+        function loadCSVContent(content, fileName) {
+            Papa.parse(content, {
+                header: true,
+                skipEmptyLines: true,
+                complete: function(result) {
+                    rawData = result.data.map(enhanceRowWithDerivedFields);
+                    buildDomainFilter(rawData);
+                    updateSummary(rawData);
+                    applyFilters();
+                    setDataSourceLabel(fileName || '自訂 CSV');
+                },
+                error: function(err) {
+                    alert('CSV 解析失敗：' + err.message);
+                }
+            });
+        }
+
+        function attachEvents() {
+            [
+                elements.domainFilter,
+                elements.recordTypeFilter,
+                elements.port80Filter,
+                elements.port443Filter,
+                elements.selfSignedFilter
+            ].forEach(el => el.addEventListener('change', applyFilters));
+
+            elements.searchInput.addEventListener('input', function() {
+                applyFilters();
+            });
+
+            elements.fileInput.addEventListener('change', function() {
+                if (this.files && this.files[0]) {
+                    const file = this.files[0];
+                    const reader = new FileReader();
+                    reader.onload = function(ev) {
+                        loadCSVContent(ev.target.result, file.name);
+                    };
+                    reader.readAsText(file);
+                }
+            });
+
+            // 點擊表頭排序
+            document.querySelectorAll('#resultTable thead th.sortable').forEach(th => {
+                th.addEventListener('click', () => {
+                    const key = th.getAttribute('data-key');
+                    if (sortState.key === key) {
+                        sortState.dir = (sortState.dir === 'asc') ? 'desc' : 'asc';
+                    } else {
+                        sortState.key = key;
+                        sortState.dir = 'asc';
+                    }
+                    applyFilters();
+                });
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            attachEvents();
+            buildDomainFilter([]);
+            renderTable([]);
+            updateSummary([]);
+            updateHeaderSortStyles();
+            setDataSourceLabel('');
+        });
+    </script>
+</body>
+</html>
