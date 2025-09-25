@@ -10,8 +10,6 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import subprocess
 from google.oauth2.credentials import Credentials as UserCredentials
-
-
 def resolve_credentials_path(cli_path: str | None = None) -> str | None:
     """Resolves the credentials path similarly to list_ips.py."""
     if cli_path and os.path.isfile(cli_path):
@@ -465,8 +463,10 @@ def main():
             # 输出详细 DNS 记录到 CSV
             csv_filename = f"india_game_pro_domains_dns_detailed_{ts}.csv"
             with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['project_id', 'domain_name', 'state', 'expire_time', 'contact_privacy',
-                             'dns_provider', 'cloud_dns_zone', 'record_name', 'record_type', 'ttl', 'record_value']
+                fieldnames = [
+                    'project_id', 'domain_name', 'state', 'expire_time', 'contact_privacy',
+                    'dns_provider', 'cloud_dns_zone', 'record_name', 'record_type', 'ttl', 'record_value'
+                ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
                 writer.writeheader()
@@ -511,7 +511,7 @@ def main():
                                             'record_name': name,
                                             'record_type': record_type,
                                             'ttl': ttl,
-                                            'record_value': rrdata
+                                            'record_value': rrdata,
                                         })
                         except Exception as e:
                             writer.writerow({
@@ -525,7 +525,7 @@ def main():
                                 'record_name': '',
                                 'record_type': 'ERROR',
                                 'ttl': '',
-                                'record_value': f'解析记录时出错: {e}'
+                                'record_value': f'解析记录时出错: {e}',
                             })
 
             print(f"✅ 已保存 {len(registrations)} 个域名的详细 DNS 记录到: {csv_filename}")
@@ -565,7 +565,7 @@ def main():
                 dns_zone = str(dns_zone) if dns_zone else 'N/A'
                 expire_time = str(expire_time) if expire_time else 'N/A'
 
-                print(f"{domain:<35} {state:<10} {dns_provider:<15} {dns_zone:<25} {records_count:<8} {expire_time}")
+                print(f"{domain:<35} {state:<10} {dns_provider:<15} {dns_zone:<25} {records_count:<8} {expire_time:<12}")
         else:
             # 详细输出
             print(f"\n{'='*120}")
