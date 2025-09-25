@@ -1,119 +1,79 @@
 #!/bin/bash
 
-# OpenVPN 用戶OVPN文件生成腳本
-# 用法: $0 <username>
-# 環境變數:
-#   FORCE_RECREATE=true  - 強制重新創建現有用戶（不提示）
-#   PASSWORD=<password>  - 設定自定義密碼（預設: 1qaz2wsx）
-
-set -e
-
-# 顏色定義
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# 日誌函數
-log() {
-    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1"
-}
-
-warn() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-    exit 1
-}
-
-# 顯示使用說明
-show_usage() {
-    echo -e "${BLUE}OpenVPN 用戶 OVPN 文件生成腳本${NC}"
-    echo -e "用法: $0 <username>"
-    echo
-    echo -e "環境變數:"
-    echo -e "  ${YELLOW}FORCE_RECREATE=true${NC}  - 強制重新創建現有用戶（不提示）"
-    echo -e "  ${YELLOW}PASSWORD=<password>${NC}   - 設定自定義密碼（預設: 1qaz2wsx）"
-    echo
-    echo -e "範例:"
-    echo -e "  $0 john"
-    echo -e "  FORCE_RECREATE=true $0 john"
-    echo -e "  PASSWORD=mypassword $0 john"
-    exit 1
-}
-
-# 檢查參數（先處理幫助請求）
-case "$1" in
-    -h|--help|help)
-        show_usage
-        ;;
-    "")
-        error "請提供用戶名參數。使用 $0 -h 查看說明"
-        ;;
-esac
-
-# 檢查是否為 root 用戶
-if [[ $EUID -ne 0 ]]; then
-   error "此腳本需要 root 權限運行"
-fi
-
-# 配置變數
+PASSWORD="1qaz2wsx"
 OVPN_DATA="/opt/openvpn"
-PASSWORD="${PASSWORD:-1qaz2wsx}"  # 允許通過環境變數設定
 
-USERNAME="$1"
-
-# 檢查必要的依賴
-check_dependencies() {
-    log "檢查依賴..."
-    
-    # 檢查 Docker
-    if ! command -v docker &> /dev/null; then
-        error "Docker 未安裝，請先安裝 Docker"
+# 動態獲取當前外網IP
+get_current_ip() {
+    local ip=$(curl -s ipinfo.io/ip 2>/dev/null)
+    if [[ -z "$ip" || ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        echo "錯誤: 無法獲取外網IP，請檢查網路連接" >&2
+        exit 1
     fi
-    
-    # 檢查 Docker Compose
-    if ! command -v docker-compose &> /dev/null; then
-        error "Docker Compose 未安裝，請先安裝 Docker Compose"
-    fi
-    
-    # 檢查 expect
-    if ! command -v expect &> /dev/null; then
-        error "expect 未安裝，請先安裝: apt install -y expect"
-    fi
-    
-    # 檢查 OpenVPN 容器是否運行
-    if ! docker ps | grep -q openvpn; then
-        warn "OpenVPN 容器未運行，嘗試啟動..."
-        if [[ -f "docker-compose.yml" ]]; then
-            docker-compose up -d || error "無法啟動 OpenVPN 服務"
-            sleep 10
-            log "OpenVPN 服務已啟動"
-        else
-            error "docker-compose.yml 不存在，請先運行服務器安裝腳本"
-        fi
-    fi
-    
-    # 檢查 PKI 是否已初始化
-    if [[ ! -f "$OVPN_DATA/pki/ca.crt" ]]; then
-        error "PKI 未初始化，請先運行主安裝腳本"
-    fi
-    
-    log "所有依賴檢查完成"
+    echo "$ip"
 }
 
-# 撤銷用戶證書（內部函數）
-revoke_user_certificate() {
+add_user() {
     local username=$1
+    if [[ -z "$username" ]]; then
+        echo "用法: $0 add <username>"
+        exit 1
+    fi
     
-    log "撤銷用戶證書: $username"
+    echo "添加用戶: $username"
+    echo "獲取當前外網IP..."
+    local current_ip=$(get_current_ip)
+    echo "當前外網IP: $current_ip"
     
     expect -c "
 set timeout 60
-spawn docker exec openvpn easyrsa revoke $username
+spawn docker-compose run --rm openvpn easyrsa build-client-full $username nopass
+expect {
+    \"Enter pass phrase*\" {
+        send \"$PASSWORD\r\"
+        exp_continue
+    }
+    eof {
+        exit 0
+    }
+    timeout {
+        puts \"Timeout occurred\"
+        exit 1
+    }
+}
+"
+    
+    # 生成配置文件
+    docker-compose run --rm openvpn ovpn_getclient $username > $username.ovpn
+    
+    # 更新為當前IP地址
+    # 假設原始配置使用某個默認IP，我們需要替換為當前IP
+    # 查找配置文件中的 remote 行並替換IP
+    if [[ -f "$username.ovpn" ]]; then
+        # 使用sed替換remote行中的IP地址
+        sed -i -E "s/^remote [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/remote $current_ip/" "$username.ovpn"
+        echo "用戶 $username 的配置文件已生成: $username.ovpn"
+        echo "服務器IP已設置為: $current_ip"
+    else
+        echo "錯誤: 配置文件生成失敗"
+        exit 1
+    fi
+}
+
+revoke_user() {
+    local username=$1
+    if [[ -z "$username" ]]; then
+        echo "用法: $0 revoke <username>"
+        exit 1
+    fi
+    
+    echo "撤销用戶: $username"
+    
+    # 步骤1：撤销证书
+    echo "步骤1: 撤销證書..."
+    expect -c "
+set timeout 60
+spawn docker exec -it openvpn easyrsa revoke $username
 expect {
     \"Type the word 'yes'*\" {
         send \"yes\r\"
@@ -131,53 +91,13 @@ expect {
         exit 1
     }
 }
-" || warn "證書撤銷可能失敗"
+"
     
-    # 重新生成 CRL（證書撤銷列表）
-    docker exec openvpn easyrsa gen-crl || warn "CRL 生成失敗"
-    
-    # 重新啟動容器以應用撤銷列表（使用更安全的方式）
-    log "重新載入 OpenVPN 配置..."
-    docker exec openvpn kill -USR1 1 2>/dev/null || docker restart openvpn
-    sleep 3
-}
-
-# 創建客戶端證書
-create_client_certificate() {
-    local username=$1
-    
-    log "創建客戶端證書: $username"
-    
-    # 檢查用戶是否已存在
-    if docker exec openvpn test -f "/etc/openvpn/pki/issued/${username}.crt" 2>/dev/null; then
-        warn "用戶 $username 的證書已存在"
-        
-        # 在非互動模式下，提供環境變數選項
-        if [[ -n "$FORCE_RECREATE" && "$FORCE_RECREATE" == "true" ]]; then
-            log "強制重新創建模式已啟用"
-        else
-            echo -n "是否要重新創建? (y/N): "
-            read -r REPLY
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                log "跳過證書創建"
-                return 0
-            fi
-        fi
-        
-        # 先撤銷現有證書
-        log "撤銷現有證書..."
-        revoke_user_certificate "$username"
-    fi
-    
-    # 檢查 docker-compose.yml 是否存在
-    if [[ ! -f "docker-compose.yml" ]]; then
-        error "docker-compose.yml 不存在，請先運行服務器安裝腳本"
-    fi
-    
-    # 使用 expect 自動輸入密碼創建證書
+    # 步骤2：生成新的 CRL (这是关键步骤！)
+    echo "步骤2: 生成新的證書撤銷列表 (CRL)..."
     expect -c "
 set timeout 60
-spawn docker-compose run --rm openvpn easyrsa build-client-full $username nopass
+spawn docker exec -it openvpn easyrsa gen-crl
 expect {
     \"Enter pass phrase*\" {
         send \"$PASSWORD\r\"
@@ -191,102 +111,169 @@ expect {
         exit 1
     }
 }
-" || error "客戶端證書創建失敗"
+"
     
-    log "客戶端證書創建成功: $username"
-}
-
-# 生成客戶端配置文件
-generate_client_config() {
-    local username=$1
-    local output_file="${username}.ovpn"
+    # 步骤3：复制 CRL 文件到 OpenVPN 配置目录
+    echo "步骤3: 更新 OpenVPN 服务器的 CRL 文件..."
+    docker exec openvpn cp /etc/openvpn/pki/crl.pem /etc/openvpn/
     
-    log "生成客戶端配置文件: $output_file"
+    # 步骤4：确保 OpenVPN 配置包含 crl-verify
+    echo "步骤4: 檢查並更新 OpenVPN 配置..."
+    docker exec openvpn sh -c "grep -q 'crl-verify' /etc/openvpn/openvpn.conf || echo 'crl-verify /etc/openvpn/crl.pem' >> /etc/openvpn/openvpn.conf"
     
-    # 生成 OVPN 配置文件
-    docker-compose run --rm openvpn ovpn_getclient "$username" > "$output_file" || error "配置文件生成失敗"
+    # 步骤5：重启容器以应用更改
+    echo "步骤5: 重啟 OpenVPN 容器..."
+    docker-compose restart openvpn
     
-    # 檢查文件是否成功生成
-    if [[ ! -f "$output_file" || ! -s "$output_file" ]]; then
-        error "配置文件生成失敗或文件為空"
+    # 步骤6：删除本地的 .ovpn 文件（如果存在）
+    if [[ -f "$username.ovpn" ]]; then
+        echo "步骤6: 刪除本地配置文件 $username.ovpn"
+        rm "$username.ovpn"
     fi
     
-    log "配置文件生成成功: $output_file"
-    return 0
+    # 步骤7：验证撤销状态
+    echo "步骤7: 等待容器啟動並驗證撤銷狀態..."
+    sleep 10
+    docker exec openvpn openssl crl -in /etc/openvpn/crl.pem -text -noout | grep -A 5 "Revoked Certificates" || echo "CRL 文件可能為空"
+    
+    echo "✅ 用戶 $username 已成功撤銷"
+    echo "⚠️  注意：如果用戶仍在連接中，需要等待會話超時或手動斷開"
 }
 
-
-# 驗證生成的配置文件
-verify_config_file() {
-    local username=$1
-    local config_file="${username}.ovpn"
+# 更新現有配置文件的IP地址為當前外網IP
+update_existing_configs() {
+    echo "更新現有配置文件中的IP地址..."
+    echo "獲取當前外網IP..."
+    local current_ip=$(get_current_ip)
+    echo "當前外網IP: $current_ip"
     
-    log "驗證配置文件: $config_file"
-    
-    # 檢查文件大小
-    local file_size=$(stat -f%z "$config_file" 2>/dev/null || stat -c%s "$config_file" 2>/dev/null || echo 0)
-    if [[ $file_size -lt 1000 ]]; then
-        warn "配置文件可能不完整，大小只有 ${file_size} bytes"
-        return 1
-    fi
-    
-    # 檢查必要內容
-    local required_sections=("BEGIN CERTIFICATE" "BEGIN PRIVATE KEY" "BEGIN OpenVPN Static key")
-    for section in "${required_sections[@]}"; do
-        if ! grep -q "$section" "$config_file"; then
-            warn "配置文件缺少必要部分: $section"
-            return 1
+    local count=0
+    for ovpn_file in *.ovpn; do
+        if [[ -f "$ovpn_file" ]]; then
+            # 使用sed替換remote行中的IP地址
+            sed -i -E "s/^remote [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/remote $current_ip/" "$ovpn_file"
+            echo "已更新: $ovpn_file -> $current_ip"
+            ((count++))
         fi
     done
     
-    log "配置文件驗證通過"
-    return 0
-}
-
-# 顯示結果信息
-show_result() {
-    local username=$1
-    local config_file="${username}.ovpn"
-    
-    echo
-    echo -e "${BLUE}=== 用戶創建完成 ===${NC}"
-    echo -e "用戶名: ${GREEN}$username${NC}"
-    echo -e "配置文件: ${GREEN}$config_file${NC}"
-    echo -e "文件大小: ${GREEN}$(ls -lh "$config_file" | awk '{print $5}')${NC}"
-    echo
-    echo -e "${BLUE}=== 使用說明 ===${NC}"
-    echo -e "1. 下載配置文件: ${YELLOW}$config_file${NC}"
-    echo -e "2. 導入到 OpenVPN 客戶端"
-    echo -e "3. 連接到 VPN 服務器"
-    echo
-    echo -e "${BLUE}=== 管理命令 ===${NC}"
-    echo -e "查看服務狀態: ${YELLOW}docker-compose ps${NC}"
-    echo -e "查看日誌: ${YELLOW}docker-compose logs -f openvpn${NC}"
-    echo -e "撤銷用戶: ${YELLOW}./manage_openvpn_users.sh revoke $username${NC}"
-    echo
-}
-
-# 主執行邏輯
-main() {
-    log "開始為用戶 $USERNAME 生成 OVPN 配置文件..."
-    
-    # 1. 檢查依賴
-    check_dependencies
-    
-    # 2. 創建客戶端證書
-    create_client_certificate "$USERNAME"
-    
-    # 3. 生成客戶端配置文件
-    generate_client_config "$USERNAME"
-    
-    # 4. 驗證配置文件
-    if verify_config_file "$USERNAME"; then
-        log "用戶 $USERNAME 的 OVPN 配置文件創建成功！"
-        show_result "$USERNAME"
+    if [[ $count -eq 0 ]]; then
+        echo "未找到任何 .ovpn 配置文件"
     else
-        error "配置文件驗證失敗，請檢查日誌"
+        echo "✅ 共更新了 $count 個配置文件"
     fi
 }
 
-# 執行主函數
-main
+# 檢查CRL狀態和撤銷的證書
+check_crl_status() {
+    echo "=== CRL 狀態檢查 ==="
+    
+    # 檢查CRL文件是否存在
+    echo "檢查 CRL 文件..."
+    docker exec openvpn ls -la /etc/openvpn/crl.pem 2>/dev/null || {
+        echo "❌ CRL 文件不存在！這就是為什麼撤銷不生效的原因！"
+        echo "嘗試生成 CRL 文件..."
+        docker exec openvpn easyrsa gen-crl
+        docker exec openvpn cp /etc/openvpn/pki/crl.pem /etc/openvpn/
+        echo "✅ CRL 文件已生成"
+    }
+    
+    # 顯示撤銷的證書
+    echo -e "\n=== 撤銷的證書列表 ==="
+    docker exec openvpn openssl crl -in /etc/openvpn/crl.pem -text -noout | grep -A 10 "Revoked Certificates" || echo "目前沒有撤銷的證書"
+    
+    # 檢查OpenVPN服務器配置
+    echo -e "\n=== OpenVPN 服務器配置檢查 ==="
+    docker exec openvpn grep -E "(crl-verify|crl)" /etc/openvpn/openvpn.conf || {
+        echo "❌ 配置文件中缺少 crl-verify 選項！"
+        echo "添加 crl-verify 配置..."
+        docker exec openvpn sh -c "echo 'crl-verify /etc/openvpn/crl.pem' >> /etc/openvpn/openvpn.conf"
+        echo "✅ 已添加 crl-verify 配置，需要重啟容器"
+    }
+    
+    # 顯示當前外網IP
+    echo -e "\n=== 當前外網IP信息 ==="
+    local current_ip=$(get_current_ip)
+    echo "當前外網IP: $current_ip"
+}
+
+# 立即修復撤銷問題
+fix_revocation() {
+    echo "=== 修復撤銷功能 ==="
+    
+    # 1. 生成 CRL 文件
+    echo "1. 生成 CRL 文件..."
+    expect -c "
+set timeout 60
+spawn docker exec -it openvpn easyrsa gen-crl
+expect {
+    \"Enter pass phrase*\" {
+        send \"$PASSWORD\r\"
+        exp_continue
+    }
+    eof {
+        exit 0
+    }
+    timeout {
+        puts \"Timeout occurred\"
+        exit 1
+    }
+}
+"
+    
+    # 2. 複製到正確位置
+    echo "2. 複製 CRL 文件..."
+    docker exec openvpn cp /etc/openvpn/pki/crl.pem /etc/openvpn/
+    
+    # 3. 添加 crl-verify 配置
+    echo "3. 更新配置文件..."
+    docker exec openvpn sh -c "grep -q 'crl-verify' /etc/openvpn/openvpn.conf || echo 'crl-verify /etc/openvpn/crl.pem' >> /etc/openvpn/openvpn.conf"
+    
+    # 4. 重啟容器
+    echo "4. 重啟 OpenVPN 容器..."
+    docker-compose restart openvpn
+    
+    echo "✅ 撤銷功能修復完成！"
+}
+
+# 顯示當前IP信息
+show_ip_info() {
+    echo "=== 獲取詳細IP信息 ==="
+    local ip_info=$(curl -s ipinfo.io 2>/dev/null)
+    if [[ -n "$ip_info" ]]; then
+        echo "$ip_info" | jq . 2>/dev/null || echo "$ip_info"
+    else
+        echo "無法獲取IP信息，請檢查網路連接"
+    fi
+}
+
+case "$1" in
+    add)
+        add_user $2
+        ;;
+    revoke)
+        revoke_user $2
+        ;;
+    update-ip)
+        update_existing_configs
+        ;;
+    check-crl)
+        check_crl_status
+        ;;
+    fix-revocation)
+        fix_revocation
+        ;;
+    show-ip)
+        show_ip_info
+        ;;
+    *)
+        echo "用法: $0 {add|revoke|update-ip|check-crl|fix-revocation|show-ip} <username>"
+        echo "  add            - 添加新用戶（自動使用當前外網IP）"
+        echo "  revoke         - 撤銷用戶（完整流程）"
+        echo "  update-ip      - 更新現有配置文件為當前外網IP"
+        echo "  check-crl      - 檢查CRL狀態和配置"
+        echo "  fix-revocation - 立即修復撤銷功能"
+        echo "  show-ip        - 顯示詳細IP信息"
+        exit 1
+        ;;
+esac
