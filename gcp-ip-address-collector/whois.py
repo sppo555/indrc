@@ -24,9 +24,9 @@ class Colors:
 # 配置參數
 CONFIG = {
     'domains_file': 'domains.txt',
-    'max_retries': 3,
+    'max_retries': 1,
     'retry_delay': 2,
-    'whois_timeout': 5,
+    'whois_timeout': 3,
     'warning_days': 50,  # 預設50天內過期會警告
     'target_fields': [
         'Registrar:',
@@ -51,8 +51,8 @@ WHOIS_SERVERS = [
     'whois.registrar-servers.com'
 ]
 
-# 針對 .win 的常見註冊商 WHOIS（猜測清單，避免直接打 whois.nic.win 的限流）
-REGISTRAR_GUESS_SERVERS_WIN = [
+# 通用的常見註冊商 WHOIS（猜測清單，當無 registrar whois 或失敗時作為回退）
+REGISTRAR_GUESS_SERVERS = [
     'grs-whois.aliyun.com',
     'whois.godaddy.com',
     'whois.namecheap.com',
@@ -247,13 +247,25 @@ def rdap_to_whois_text(rdap_json: dict) -> str:
         pass
     return "\n".join(lines)
 
+def get_tld(domain: str) -> str:
+    """提取 TLD（最右一段），不含點"""
+    d = domain.strip().lower()
+    parts = d.split('.')
+    return parts[-1] if len(parts) > 1 else ''
+
 def query_domain_single_attempt(domain, attempt, max_attempts):
     """單次嘗試查詢域名（以註冊局為優先，取消過早返回）"""
     print(f"{Colors.BLUE}正在查詢: {domain} (嘗試 {attempt}/{max_attempts}){Colors.NC}")
-
-    registry_host = 'whois.verisign-grs.com'
+    
+    # 動態決定註冊局 whois：.com/.net 用 Verisign，其餘預設 whois.nic.<tld>
+    tld = get_tld(domain)
+    if tld in ('com', 'net'):
+        registry_host = 'whois.verisign-grs.com'
+    else:
+        registry_host = f"whois.nic.{tld}" if tld else None
     best_success = None  # 儲存第一個成功（作為回退）
     registry_success = None  # 儲存註冊局的成功結果（優先採用）
+    attempted_hosts = set()  # 記錄已嘗試過的 whois 主機，避免重複
 
     # 針對 .win：改為「只用 WHOIS」，且優先嘗試常見註冊商，避免直接打 whois.nic.win 造成限流
     is_win = domain.lower().endswith('.win')
@@ -261,7 +273,7 @@ def query_domain_single_attempt(domain, attempt, max_attempts):
     if is_win:
         print(f"{Colors.YELLOW}  ⚬ .win 採用『註冊商 WHOIS 優先，避免 nic.win』策略{Colors.NC}")
         # 先嘗試猜測的註冊商 WHOIS 列表
-        for guess in REGISTRAR_GUESS_SERVERS_WIN:
+        for guess in REGISTRAR_GUESS_SERVERS:
             print(f"{Colors.YELLOW}    ▷ 嘗試註冊商 WHOIS: {guess} ({local_timeout}s 超時){Colors.NC}")
             time.sleep(0.2 + random.uniform(0, 0.4))
             res = run_whois_command(domain, guess, local_timeout)
@@ -270,7 +282,21 @@ def query_domain_single_attempt(domain, attempt, max_attempts):
                 return True, res.data
         # 若猜測未命中，再進入一般迴圈（但我們稍後會跳過 whois.nic.win）
 
-    for server in WHOIS_SERVERS:
+    # 建立本次實際要嘗試的 server 順序（縮減為『只嘗試與該 TLD 相關的來源』）：
+    #  - 非 .win：優先註冊局（whois.nic.<tld> 或 verisign），其次『自動選擇』
+    #  - .win：前段已嘗試註冊商清單；主循環保留『自動選擇』與最少量的通用來源
+    servers_to_try = []
+    if not is_win and registry_host:
+        servers_to_try.append(registry_host)
+    # 其次嘗試自動選擇
+    if None not in servers_to_try:
+        servers_to_try.append(None)
+    # 可選的極少量通用來源（避免掃遍其他 TLD 的 whois.nic.*）
+    for s in ['whois.registrar-servers.com']:
+        if s not in servers_to_try:
+            servers_to_try.append(s)
+
+    for server in servers_to_try:
         server_info = "自動選擇" if server is None else f"服務器: {server}"
         print(f"{Colors.YELLOW}  ⚬ 嘗試 {server_info} ({local_timeout}s 超時)...{Colors.NC}")
 
@@ -285,6 +311,8 @@ def query_domain_single_attempt(domain, attempt, max_attempts):
 
         # 執行whois查詢
         result = run_whois_command(domain, server, local_timeout)
+        if server:
+            attempted_hosts.add(server)
 
         # 處理不同的錯誤情況
         if result.error == "timeout":
@@ -295,13 +323,13 @@ def query_domain_single_attempt(domain, attempt, max_attempts):
             continue
 
         lower_data = (result.data or '').lower()
-        # 偵測限流字串（此處不再使用 RDAP 回退，維持純 WHOIS 策略）
+        # 偵測限流字串（維持純 WHOIS 策略）
         if 'number of allowed queries exceeded' in lower_data or 'limit exceeded' in lower_data:
-            print(f"{Colors.YELLOW}    ⚬ 偵測到註冊局限流，啟動退避並嘗試 RDAP{Colors.NC}")
+            print(f"{Colors.YELLOW}    ⚬ 偵測到註冊局限流，將退避後改嘗試其他來源{Colors.NC}")
             # 退避等待（帶抖動）
             sleep_s = min(10, 2 * attempt) + random.uniform(0.2, 0.8)
             time.sleep(sleep_s)
-            # 若 RDAP 仍失敗，繼續嘗試下一個 whois 來源
+            # 繼續嘗試下一個 whois 來源
             continue
 
         # 檢查是否有目標欄位資料（僅作為顯示用途）
@@ -329,7 +357,7 @@ def query_domain_single_attempt(domain, attempt, max_attempts):
             print("----------------------------------------")
 
             # 優先：若是註冊局回應，直接採用
-            if server == registry_host:
+            if registry_host and server == registry_host:
                 registry_success = result.data
                 break
 
@@ -346,7 +374,7 @@ def query_domain_single_attempt(domain, attempt, max_attempts):
             # 若回包中有 Registrar WHOIS Server，可嘗試切換到該註冊商來源
             fields = parse_fields(result.data)
             registrar_whois = fields.get('registrar_whois_server', '')
-            if registrar_whois:
+            if registrar_whois and registrar_whois not in attempted_hosts:
                 print(f"{Colors.YELLOW}    ⚬ 嘗試註冊商 WHOIS: {registrar_whois}{Colors.NC}")
                 # 註冊商查詢也加上 .win 的抖動與較長超時
                 if is_win:
@@ -359,6 +387,21 @@ def query_domain_single_attempt(domain, attempt, max_attempts):
                         return True, reg_res.data
                 else:
                     print(f"{Colors.RED}    ✗ 註冊商 WHOIS 失敗 - {reg_res.error}{Colors.NC}")
+
+            # 保留最終回退到迴圈之後統一處理，避免重複嘗試
+
+    # 迴圈耗盡仍未成功：統一執行一次「通用註冊商 WHOIS 回退」，避免在每個來源重複嘗試
+    for guess in REGISTRAR_GUESS_SERVERS:
+        if guess in attempted_hosts:
+            continue
+        print(f"{Colors.YELLOW}    ▷ 最終回退：嘗試常見註冊商 WHOIS: {guess}{Colors.NC}")
+        if is_win:
+            time.sleep(0.2 + random.uniform(0, 0.4))
+        reg_res2 = run_whois_command(domain, guess, local_timeout)
+        attempted_hosts.add(guess)
+        if not reg_res2.error and parse_expiry_date(reg_res2.data):
+            print(f"{Colors.GREEN}    ✓ 成功（通用註冊商 WHOIS 回退）{Colors.NC}")
+            return True, reg_res2.data
 
     # 最終決策：註冊局優先，其次使用第一個成功結果
     if registry_success is not None:
