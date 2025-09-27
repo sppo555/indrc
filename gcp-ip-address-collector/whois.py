@@ -3,6 +3,9 @@ import subprocess
 import time
 import re
 import sys
+import json
+import random
+from urllib import request, error as urlerror
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -23,7 +26,7 @@ CONFIG = {
     'domains_file': 'domains.txt',
     'max_retries': 3,
     'retry_delay': 2,
-    'whois_timeout': 2,
+    'whois_timeout': 5,
     'warning_days': 50,  # 預設50天內過期會警告
     'target_fields': [
         'Registrar:',
@@ -37,14 +40,24 @@ CONFIG = {
 # 多個whois服務器
 WHOIS_SERVERS = [
     None,  # 自動選擇
+    # 將 .com/.net 的註冊局（Verisign）前置，減少受到快取/鏡像影響
+    'whois.verisign-grs.com',
     'whois.nic.site',
     'whois.nic.club',
     'whois.nic.fun',
     'whois.nic.net',
     'whois.nic.online',
     'whois.nic.win',
-    'whois.verisign-grs.com',
     'whois.registrar-servers.com'
+]
+
+# 針對 .win 的常見註冊商 WHOIS（猜測清單，避免直接打 whois.nic.win 的限流）
+REGISTRAR_GUESS_SERVERS_WIN = [
+    'grs-whois.aliyun.com',
+    'whois.godaddy.com',
+    'whois.namecheap.com',
+    'whois.tucows.com',
+    'whois.publicdomainregistry.com'
 ]
 
 class WhoisQueryResult:
@@ -178,17 +191,101 @@ def parse_fields(whois_data):
         'registry_expiry_date': find_value('Registry Expiry Date:'),
     }
 
+def get_rdap_url(domain: str) -> str:
+    """根據 TLD 產生 RDAP 查詢端點（目前覆蓋 .com/.net/.win）"""
+    d = domain.strip().lower()
+    if d.endswith('.com'):
+        return f"https://rdap.verisign.com/com/v1/domain/{d}"
+    if d.endswith('.net'):
+        return f"https://rdap.verisign.com/net/v1/domain/{d}"
+    if d.endswith('.win'):
+        return f"https://rdap.nic.win/domain/{d}"
+    return ''
+
+def rdap_fetch(domain: str, timeout: int = 8):
+    """發送 RDAP 請求並回傳 JSON 物件，失敗回傳 None"""
+    url = get_rdap_url(domain)
+    if not url:
+        return None
+    try:
+        req = request.Request(url, headers={
+            'Accept': 'application/rdap+json, application/json;q=0.9,*/*;q=0.8',
+            'User-Agent': 'whois-batch/1.0'
+        })
+        with request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read().decode('utf-8', 'ignore')
+            return json.loads(data)
+    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError):
+        return None
+
+def rdap_to_whois_text(rdap_json: dict) -> str:
+    """將 RDAP JSON 轉為類似 WHOIS 的文字，方便沿用既有解析邏輯"""
+    if not rdap_json:
+        return ''
+    lines = []
+    # Registrar 名稱
+    try:
+        for ent in rdap_json.get('entities', []):
+            if 'registrar' in ent.get('roles', []):
+                # vcardArray 可能包含名稱
+                v = ent.get('vcardArray', [])
+                if len(v) == 2 and isinstance(v[1], list):
+                    for item in v[1]:
+                        if isinstance(item, list) and len(item) >= 4 and item[0] == 'fn':
+                            lines.append(f"Registrar: {item[3]}")
+                            break
+                break
+    except Exception:
+        pass
+    # expiration 事件
+    try:
+        for ev in rdap_json.get('events', []):
+            if ev.get('eventAction') == 'expiration' and ev.get('eventDate'):
+                lines.append(f"Registry Expiry Date: {ev.get('eventDate')}")
+                break
+    except Exception:
+        pass
+    return "\n".join(lines)
+
 def query_domain_single_attempt(domain, attempt, max_attempts):
-    """單次嘗試查詢域名"""
+    """單次嘗試查詢域名（以註冊局為優先，取消過早返回）"""
     print(f"{Colors.BLUE}正在查詢: {domain} (嘗試 {attempt}/{max_attempts}){Colors.NC}")
-    
+
+    registry_host = 'whois.verisign-grs.com'
+    best_success = None  # 儲存第一個成功（作為回退）
+    registry_success = None  # 儲存註冊局的成功結果（優先採用）
+
+    # 針對 .win：改為「只用 WHOIS」，且優先嘗試常見註冊商，避免直接打 whois.nic.win 造成限流
+    is_win = domain.lower().endswith('.win')
+    local_timeout = 10 if is_win else CONFIG['whois_timeout']
+    if is_win:
+        print(f"{Colors.YELLOW}  ⚬ .win 採用『註冊商 WHOIS 優先，避免 nic.win』策略{Colors.NC}")
+        # 先嘗試猜測的註冊商 WHOIS 列表
+        for guess in REGISTRAR_GUESS_SERVERS_WIN:
+            print(f"{Colors.YELLOW}    ▷ 嘗試註冊商 WHOIS: {guess} ({local_timeout}s 超時){Colors.NC}")
+            time.sleep(0.2 + random.uniform(0, 0.4))
+            res = run_whois_command(domain, guess, local_timeout)
+            if not res.error and parse_expiry_date(res.data):
+                print(f"{Colors.GREEN}    ✓ 成功（註冊商 WHOIS 命中）{Colors.NC}")
+                return True, res.data
+        # 若猜測未命中，再進入一般迴圈（但我們稍後會跳過 whois.nic.win）
+
     for server in WHOIS_SERVERS:
         server_info = "自動選擇" if server is None else f"服務器: {server}"
-        print(f"{Colors.YELLOW}  ⚬ 嘗試 {server_info} ({CONFIG['whois_timeout']}s 超時)...{Colors.NC}")
-        
+        print(f"{Colors.YELLOW}  ⚬ 嘗試 {server_info} ({local_timeout}s 超時)...{Colors.NC}")
+
+        # 對 .win 在每次查詢前加隨機抖動，降低觸發限流機率
+        if is_win:
+            time.sleep(0.3 + random.uniform(0, 0.6))
+
+        # 若為 .win，跳過 whois.nic.win 以避免立即遭遇限流
+        if is_win and server == 'whois.nic.win':
+            print(f"{Colors.YELLOW}    ⚬ 跳過 whois.nic.win 以避免限流{Colors.NC}")
+            continue
+
         # 執行whois查詢
-        result = run_whois_command(domain, server, CONFIG['whois_timeout'])
-        
+        result = run_whois_command(domain, server, local_timeout)
+
         # 處理不同的錯誤情況
         if result.error == "timeout":
             print(f"{Colors.RED}    ✗ 超時 ({result.elapsed_time:.1f}s){Colors.NC}")
@@ -196,17 +293,30 @@ def query_domain_single_attempt(domain, attempt, max_attempts):
         elif result.error:
             print(f"{Colors.RED}    ✗ 連接失敗 ({result.elapsed_time:.1f}s) - {result.error}{Colors.NC}")
             continue
-        
-        # 檢查是否有目標欄位資料
+
+        lower_data = (result.data or '').lower()
+        # 偵測限流字串（此處不再使用 RDAP 回退，維持純 WHOIS 策略）
+        if 'number of allowed queries exceeded' in lower_data or 'limit exceeded' in lower_data:
+            print(f"{Colors.YELLOW}    ⚬ 偵測到註冊局限流，啟動退避並嘗試 RDAP{Colors.NC}")
+            # 退避等待（帶抖動）
+            sleep_s = min(10, 2 * attempt) + random.uniform(0.2, 0.8)
+            time.sleep(sleep_s)
+            # 若 RDAP 仍失敗，繼續嘗試下一個 whois 來源
+            continue
+
+        # 檢查是否有目標欄位資料（僅作為顯示用途）
         target_data = extract_target_fields(result.data, CONFIG['target_fields'])
-        
-        if target_data:
+        # 放寬成功判定：只要能解析到期日就視為成功
+        parsed_expiry = parse_expiry_date(result.data)
+
+        if target_data or parsed_expiry:
             print(f"{Colors.GREEN}    ✓ 成功 ({result.elapsed_time:.1f}s){Colors.NC}")
             print(f"{Colors.GREEN}✓ 成功: {domain} ({result.server}){Colors.NC}")
-            print(target_data)
-            
-            # 解析過期日期
-            expiry_date = parse_expiry_date(result.data)
+            if target_data:
+                print(target_data)
+
+            # 解析過期日期（僅輸出訊息，不在此處返回，改為走優先級決策）
+            expiry_date = parsed_expiry
             if expiry_date:
                 days_until_expiry = (expiry_date - datetime.now()).days
                 if days_until_expiry < 0:
@@ -215,16 +325,47 @@ def query_domain_single_attempt(domain, attempt, max_attempts):
                     print(f"{Colors.YELLOW}⚠️  域名將在 {days_until_expiry} 天後過期！{Colors.NC}")
                 else:
                     print(f"{Colors.GREEN}✓ 域名還有 {days_until_expiry} 天到期{Colors.NC}")
-            
+
             print("----------------------------------------")
-            return True, result.data
+
+            # 優先：若是註冊局回應，直接採用
+            if server == registry_host:
+                registry_success = result.data
+                break
+
+            # 否則先記錄為回退候選
+            if best_success is None:
+                best_success = result.data
         else:
             # 檢查域名是否存在
             if re.search(r'no match|not found|no data found|domain.*not.*exist', result.data, re.IGNORECASE):
                 print(f"{Colors.YELLOW}    ⚬ 域名不存在或無註冊資料 ({result.elapsed_time:.1f}s){Colors.NC}")
             else:
                 print(f"{Colors.YELLOW}    ⚬ 無相關資料 ({result.elapsed_time:.1f}s){Colors.NC}")
-    
+
+            # 若回包中有 Registrar WHOIS Server，可嘗試切換到該註冊商來源
+            fields = parse_fields(result.data)
+            registrar_whois = fields.get('registrar_whois_server', '')
+            if registrar_whois:
+                print(f"{Colors.YELLOW}    ⚬ 嘗試註冊商 WHOIS: {registrar_whois}{Colors.NC}")
+                # 註冊商查詢也加上 .win 的抖動與較長超時
+                if is_win:
+                    time.sleep(0.3 + random.uniform(0, 0.6))
+                reg_res = run_whois_command(domain, registrar_whois, local_timeout)
+                if not reg_res.error:
+                    # 再次判定是否成功
+                    if parse_expiry_date(reg_res.data):
+                        print(f"{Colors.GREEN}    ✓ 註冊商 WHOIS 成功{Colors.NC}")
+                        return True, reg_res.data
+                else:
+                    print(f"{Colors.RED}    ✗ 註冊商 WHOIS 失敗 - {reg_res.error}{Colors.NC}")
+
+    # 最終決策：註冊局優先，其次使用第一個成功結果
+    if registry_success is not None:
+        return True, registry_success
+    if best_success is not None:
+        return True, best_success
+
     return False, None
 
 def query_domain_with_retry(domain):
